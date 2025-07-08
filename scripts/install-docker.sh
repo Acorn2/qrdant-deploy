@@ -2,7 +2,7 @@
 
 # Docker 安装脚本 - 适用于腾讯云 OpenCloudOS
 # 作者: qrdant-deploy 项目
-# 版本: 1.0
+# 版本: 1.1 - 修复 yum makecache 兼容性问题
 
 set -e
 
@@ -32,7 +32,7 @@ check_root() {
     fi
 }
 
-# 检查系统版本
+# 检查系统版本和包管理器
 check_system() {
     log_info "检查系统版本..."
     
@@ -45,6 +45,18 @@ check_system() {
     else
         log_warn "未检测到标准的 OpenCloudOS 标识，但将尝试继续安装"
     fi
+    
+    # 检查包管理器类型
+    if command -v dnf &> /dev/null; then
+        log_info "检测到 DNF 包管理器"
+        PKG_MANAGER="dnf"
+    elif command -v yum &> /dev/null; then
+        log_info "检测到 YUM 包管理器"
+        PKG_MANAGER="yum"
+    else
+        log_error "未找到支持的包管理器 (yum/dnf)"
+        exit 1
+    fi
 }
 
 # 卸载旧版本 Docker
@@ -56,7 +68,7 @@ remove_old_docker() {
     systemctl stop docker.socket 2>/dev/null || true
     
     # 卸载旧版本
-    yum remove -y docker \
+    $PKG_MANAGER remove -y docker \
         docker-client \
         docker-client-latest \
         docker-common \
@@ -77,8 +89,13 @@ remove_old_docker() {
 install_dependencies() {
     log_info "安装必要的依赖包..."
     
-    yum update -y
-    yum install -y yum-utils device-mapper-persistent-data lvm2 curl wget
+    $PKG_MANAGER update -y
+    
+    if [[ $PKG_MANAGER == "dnf" ]]; then
+        $PKG_MANAGER install -y dnf-utils device-mapper-persistent-data lvm2 curl wget
+    else
+        $PKG_MANAGER install -y yum-utils device-mapper-persistent-data lvm2 curl wget
+    fi
     
     log_info "依赖包安装完成"
 }
@@ -87,8 +104,13 @@ install_dependencies() {
 add_docker_repo() {
     log_info "添加 Docker 官方仓库..."
     
-    # 添加 Docker CE 仓库
-    yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+    if [[ $PKG_MANAGER == "dnf" ]]; then
+        # 使用 dnf config-manager
+        dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+    else
+        # 使用 yum-config-manager
+        yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+    fi
     
     # 针对 OpenCloudOS，我们可能需要修改仓库配置
     if [[ -f /etc/opencloudos-release ]]; then
@@ -97,8 +119,14 @@ add_docker_repo() {
         sed -i 's/\$releasever/8/g' /etc/yum.repos.d/docker-ce.repo
     fi
     
-    # 更新仓库缓存
-    yum makecache fast
+    # 更新仓库缓存 - 修复兼容性问题
+    log_info "更新仓库缓存..."
+    if [[ $PKG_MANAGER == "dnf" ]]; then
+        dnf makecache
+    else
+        # 对于较新的 yum 版本，不使用 fast 参数
+        yum makecache || yum makecache --timer || yum makecache timer
+    fi
     
     log_info "Docker 仓库添加完成"
 }
@@ -108,7 +136,7 @@ install_docker() {
     log_info "安装 Docker CE..."
     
     # 安装最新版本的 Docker CE
-    yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     
     log_info "Docker CE 安装完成"
 }
@@ -168,10 +196,14 @@ show_install_info() {
     echo
     echo "Docker 版本信息："
     docker --version
-    docker-compose --version
+    docker-compose --version 2>/dev/null || docker compose version
     echo
     echo "Docker 服务状态："
     systemctl status docker --no-pager -l
+    echo
+    echo "包管理器信息："
+    echo "使用的包管理器: $PKG_MANAGER"
+    echo "系统版本: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"')"
     echo
     log_info "安装日志已保存到: /var/log/docker-install.log"
 }
