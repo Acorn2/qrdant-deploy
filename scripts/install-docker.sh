@@ -2,7 +2,7 @@
 
 # Docker 安装脚本 - 适用于腾讯云 OpenCloudOS
 # 作者: qrdant-deploy 项目
-# 版本: 1.3 - 解决网络连接和SSL问题
+# 版本: 1.4 - 修复安装状态检测问题
 
 set -e
 
@@ -103,15 +103,43 @@ install_dependencies() {
     log_info "依赖包安装完成"
 }
 
+# 检查 Docker 是否已正确安装
+check_docker_installed() {
+    if command -v docker &> /dev/null && systemctl list-unit-files | grep -q docker.service; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 # 方法1：使用阿里云一键安装脚本
 install_docker_aliyun_script() {
     log_info "尝试使用阿里云一键安装脚本..."
     
-    if curl -fsSL https://get.docker.com | bash -s docker --mirror Aliyun; then
-        log_info "阿里云一键安装成功"
-        return 0
+    # 下载并执行安装脚本
+    local temp_script="/tmp/get-docker.sh"
+    
+    if curl -fsSL https://get.docker.com -o "$temp_script" 2>/dev/null; then
+        log_info "脚本下载成功，开始执行安装..."
+        if bash "$temp_script" --mirror Aliyun; then
+            # 清理临时文件
+            rm -f "$temp_script"
+            
+            # 验证安装是否成功
+            if check_docker_installed; then
+                log_info "阿里云一键安装成功"
+                return 0
+            else
+                log_warn "阿里云一键安装执行完成但验证失败"
+                return 1
+            fi
+        else
+            log_warn "阿里云一键安装脚本执行失败"
+            rm -f "$temp_script"
+            return 1
+        fi
     else
-        log_warn "阿里云一键安装失败"
+        log_warn "阿里云一键安装脚本下载失败"
         return 1
     fi
 }
@@ -140,8 +168,13 @@ install_docker_tencent_mirror() {
     
     # 安装 Docker
     if $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
-        log_info "腾讯云镜像源安装成功"
-        return 0
+        if check_docker_installed; then
+            log_info "腾讯云镜像源安装成功"
+            return 0
+        else
+            log_warn "腾讯云镜像源安装包下载成功但验证失败"
+            return 1
+        fi
     else
         log_warn "腾讯云镜像源安装失败"
         return 1
@@ -169,8 +202,13 @@ install_docker_aliyun_mirror() {
     
     # 安装 Docker
     if $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
-        log_info "阿里云镜像源安装成功"
-        return 0
+        if check_docker_installed; then
+            log_info "阿里云镜像源安装成功"
+            return 0
+        else
+            log_warn "阿里云镜像源安装包下载成功但验证失败"
+            return 1
+        fi
     else
         log_warn "阿里云镜像源安装失败"
         return 1
@@ -207,8 +245,6 @@ install_docker_official_no_ssl() {
     
     # 安装 Docker
     if $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
-        log_info "官方仓库安装成功"
-        
         # 恢复SSL验证
         if [[ $PKG_MANAGER == "dnf" ]]; then
             mv /etc/dnf/dnf.conf.backup /etc/dnf/dnf.conf 2>/dev/null || sed -i '/sslverify=False/d' /etc/dnf/dnf.conf
@@ -216,7 +252,13 @@ install_docker_official_no_ssl() {
             mv /etc/yum.conf.backup /etc/yum.conf 2>/dev/null || sed -i '/sslverify=0/d' /etc/yum.conf
         fi
         
-        return 0
+        if check_docker_installed; then
+            log_info "官方仓库安装成功"
+            return 0
+        else
+            log_warn "官方仓库安装包下载成功但验证失败"
+            return 1
+        fi
     else
         log_warn "官方仓库安装失败"
         
@@ -240,8 +282,13 @@ install_docker_system_repo() {
     
     # 尝试安装 docker
     if $PKG_MANAGER install -y docker; then
-        log_info "系统仓库安装成功"
-        return 0
+        if check_docker_installed; then
+            log_info "系统仓库安装成功"
+            return 0
+        else
+            log_warn "系统仓库安装包下载成功但验证失败"
+            return 1
+        fi
     else
         log_warn "系统仓库安装失败"
         return 1
@@ -332,6 +379,7 @@ start_docker() {
         log_info "Docker 服务启动成功"
     else
         log_error "Docker 服务启动失败"
+        systemctl status docker --no-pager
         exit 1
     fi
 }
