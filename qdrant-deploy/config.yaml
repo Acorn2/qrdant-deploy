@@ -1,0 +1,81 @@
+# Qdrant 配置文件
+# 适用于腾讯云服务器部署
+
+storage:
+  # 存储配置
+  storage_path: "/qdrant/storage"
+  # 启用WAL预写日志
+  wal_capacity_mb: 32
+  # 启用压缩
+  compression: true
+
+service:
+  # 服务配置
+  host: "0.0.0.0"
+  http_port: 6333
+  grpc_port: 6334
+  # 启用跨域请求
+  enable_cors: true
+  # 最大请求大小 (默认4MB)
+  max_request_size_mb: 32
+  # 最大响应时间
+  max_timeout_seconds: 30
+
+# 日志级别
+log_level: "INFO"
+
+# HNSW索引配置（性能优化）
+hnsw_config:
+  # 每个节点的连接数
+  m: 16
+  # 构建时的候选数
+  ef_construct: 100
+  # 全扫描阈值
+  full_scan_threshold: 10000
+  # 最大连接数
+  max_indexing_threads: 0  # 0表示使用CPU核心数
+
+# 优化器配置
+optimizer_config:
+  # 删除向量时的阈值
+  deleted_threshold: 0.2
+  # 真空处理阈值
+  vacuum_min_vector_number: 1000
+  # 默认段大小
+  default_segment_number: 0
+  # 内存映射阈值
+  memmap_threshold: 50000
+  # 索引阈值
+  indexing_threshold: 20000
+  # 刷新间隔
+  flush_interval_sec: 5
+  # 最大优化线程数
+  max_optimization_threads: 1
+
+# 集群配置（单机部署时保持注释状态）
+# cluster:
+#   enabled: false
+#   node_id: 0
+#   consensus:
+#     tick_period_ms: 100
+#     election_timeout_ms: 1000
+
+# 性能配置
+performance:
+  # 最大搜索请求数
+  max_search_requests: 100
+  # 搜索超时时间
+  search_timeout_ms: 30000
+
+# 服务发现配置（可选）
+# telemetry_disabled: false
+
+# API密钥配置（生产环境建议启用）
+# api_key: "your-secure-api-key-here"
+
+# 快照配置
+snapshot_config:
+  # 快照存储路径
+  snapshots_path: "/qdrant/snapshots"
+  # 自动快照间隔（小时）
+  # snapshot_interval_hours: 24 
