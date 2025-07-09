@@ -1,8 +1,8 @@
- #!/bin/bash
+#!/bin/bash
 
 # Qdrant 向量数据库部署脚本
 # 适用于腾讯云服务器 OpenCloudOS 系统
-# 版本: 1.0
+# 版本: 1.1 - 修复镜像拉取超时问题
 # 要求: Docker 已安装
 
 set -e
@@ -30,8 +30,8 @@ log_title() {
     echo -e "${BLUE}[标题]${NC} $1"
 }
 
-# 默认配置
-QDRANT_VERSION="latest"
+# 默认配置 - 修改为稳定版本
+QDRANT_VERSION="v1.7.4"  # 指定稳定版本，避免网络问题
 QDRANT_PORT="6333"
 QDRANT_GRPC_PORT="6334"
 QDRANT_DATA_DIR="/opt/qdrant/data"
@@ -39,12 +39,112 @@ QDRANT_CONFIG_DIR="/opt/qdrant/config"
 QDRANT_CONTAINER_NAME="qdrant-server"
 QDRANT_NETWORK="qdrant-network"
 
+# 可选的镜像版本列表
+AVAILABLE_VERSIONS=("v1.7.4" "v1.7.3" "v1.6.1" "v1.5.1" "latest")
+
+# 显示版本选择菜单
+show_version_menu() {
+    log_title "选择 Qdrant 版本"
+    echo "可用版本："
+    for i in "${!AVAILABLE_VERSIONS[@]}"; do
+        echo "$((i+1)). ${AVAILABLE_VERSIONS[$i]}"
+    done
+    echo "$((${#AVAILABLE_VERSIONS[@]}+1)). 自定义版本"
+    echo
+}
+
+# 选择版本
+select_version() {
+    while true; do
+        show_version_menu
+        read -p "请选择版本 (1-$((${#AVAILABLE_VERSIONS[@]}+1))) [默认: 1]: " choice
+        
+        # 默认选择第一个版本
+        if [[ -z "$choice" ]]; then
+            choice=1
+        fi
+        
+        if [[ "$choice" -ge 1 && "$choice" -le ${#AVAILABLE_VERSIONS[@]} ]]; then
+            QDRANT_VERSION="${AVAILABLE_VERSIONS[$((choice-1))]}"
+            log_info "已选择版本: $QDRANT_VERSION"
+            break
+        elif [[ "$choice" -eq $((${#AVAILABLE_VERSIONS[@]}+1)) ]]; then
+            read -p "请输入自定义版本 (如 v1.7.0): " custom_version
+            if [[ -n "$custom_version" ]]; then
+                QDRANT_VERSION="$custom_version"
+                log_info "已选择自定义版本: $QDRANT_VERSION"
+                break
+            else
+                log_error "版本不能为空"
+            fi
+        else
+            log_error "无效的选择，请重新输入"
+        fi
+    done
+}
+
+# 配置Docker镜像加速
+configure_docker_mirrors() {
+    log_info "检查Docker镜像加速配置..."
+    
+    # 检查是否已配置镜像源
+    if [[ -f /etc/docker/daemon.json ]] && grep -q "registry-mirrors" /etc/docker/daemon.json; then
+        log_info "Docker镜像加速已配置"
+        return 0
+    fi
+    
+    log_info "配置Docker镜像加速源..."
+    
+    # 备份现有配置
+    if [[ -f /etc/docker/daemon.json ]]; then
+        cp /etc/docker/daemon.json /etc/docker/daemon.json.backup.$(date +%Y%m%d_%H%M%S)
+    fi
+    
+    # 创建或更新daemon.json
+    mkdir -p /etc/docker
+    cat > /etc/docker/daemon.json << 'EOF'
+{
+    "registry-mirrors": [
+        "https://docker.mirrors.ustc.edu.cn",
+        "https://hub-mirror.c.163.com",
+        "https://mirror.baidubce.com",
+        "https://ccr.ccs.tencentyun.com"
+    ],
+    "exec-opts": ["native.cgroupdriver=systemd"],
+    "log-driver": "json-file",
+    "log-opts": {
+        "max-size": "100m",
+        "max-file": "3"
+    },
+    "storage-driver": "overlay2",
+    "live-restore": true,
+    "max-concurrent-downloads": 3,
+    "max-concurrent-uploads": 3
+}
+EOF
+    
+    # 重启Docker服务应用配置
+    log_info "重启Docker服务以应用镜像加速配置..."
+    systemctl daemon-reload
+    systemctl restart docker
+    
+    # 等待Docker服务完全启动
+    sleep 5
+    
+    if systemctl is-active --quiet docker; then
+        log_info "Docker服务重启成功，镜像加速配置已生效"
+    else
+        log_error "Docker服务重启失败"
+        exit 1
+    fi
+}
+
 # 检查Docker是否已安装
 check_docker() {
     log_info "检查Docker安装状态..."
     
     if ! command -v docker &> /dev/null; then
-        log_error "Docker未安装！请先运行 scripts/install-docker.sh 安装Docker"
+        log_error "Docker未安装！请先运行 ../scripts/install-docker.sh 安装Docker"
         exit 1
     fi
     
@@ -146,15 +246,58 @@ create_network() {
     fi
 }
 
-# 拉取Qdrant镜像
+# 拉取Qdrant镜像 - 增强版，支持重试和超时设置
 pull_image() {
     log_info "拉取Qdrant Docker镜像..."
     
-    log_info "正在拉取 qdrant/qdrant:$QDRANT_VERSION ..."
-    docker pull "qdrant/qdrant:$QDRANT_VERSION"
+    local max_attempts=3
+    local attempt=1
+    local pull_timeout=600  # 10分钟超时
     
-    log_info "镜像拉取完成"
-    docker images | grep qdrant
+    while [ $attempt -le $max_attempts ]; do
+        log_info "尝试拉取镜像 qdrant/qdrant:$QDRANT_VERSION (第 $attempt/$max_attempts 次)"
+        
+        # 使用timeout命令设置超时时间
+        if timeout $pull_timeout docker pull "qdrant/qdrant:$QDRANT_VERSION"; then
+            log_info "镜像拉取成功！"
+            docker images | grep qdrant
+            return 0
+        else
+            log_warn "第 $attempt 次拉取失败"
+            
+            if [ $attempt -lt $max_attempts ]; then
+                log_info "等待 10 秒后重试..."
+                sleep 10
+            fi
+            
+            ((attempt++))
+        fi
+    done
+    
+    log_error "镜像拉取失败！尝试以下解决方案："
+    echo "1. 检查网络连接"
+    echo "2. 尝试更换Docker镜像源"
+    echo "3. 使用手动拉取方式："
+    echo "   docker pull qdrant/qdrant:$QDRANT_VERSION"
+    echo "4. 或者选择其他版本重新运行脚本"
+    
+    read -p "是否继续尝试手动拉取？(y/N): " continue_manual
+    if [[ "$continue_manual" == "y" || "$continue_manual" == "Y" ]]; then
+        log_info "请手动执行以下命令："
+        echo "docker pull qdrant/qdrant:$QDRANT_VERSION"
+        read -p "拉取完成后按 Enter 继续..."
+        
+        # 验证镜像是否存在
+        if docker images | grep -q "qdrant/qdrant"; then
+            log_info "检测到Qdrant镜像，继续部署"
+            return 0
+        else
+            log_error "未检测到Qdrant镜像，部署终止"
+            exit 1
+        fi
+    else
+        exit 1
+    fi
 }
 
 # 停止并删除现有容器
@@ -268,6 +411,7 @@ show_deployment_info() {
     echo
     log_info "服务信息："
     echo "  容器名称: $QDRANT_CONTAINER_NAME"
+    echo "  版本: $QDRANT_VERSION"
     echo "  HTTP API: http://localhost:$QDRANT_PORT"
     echo "  gRPC API: localhost:$QDRANT_GRPC_PORT"
     echo "  管理界面: http://localhost:$QDRANT_PORT/dashboard"
@@ -302,13 +446,14 @@ show_deployment_info() {
 create_management_script() {
     log_info "创建Qdrant管理脚本..."
     
-    cat > "./qdrant-manage.sh" << 'EOF'
+    cat > "./qdrant-manage.sh" << EOF
 #!/bin/bash
 
 # Qdrant 服务管理脚本
 
-CONTAINER_NAME="qdrant-server"
-PORT="6333"
+CONTAINER_NAME="$QDRANT_CONTAINER_NAME"
+PORT="$QDRANT_PORT"
+VERSION="$QDRANT_VERSION"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -316,19 +461,20 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 log_info() {
-    echo -e "${GREEN}[信息]${NC} $1"
+    echo -e "\${GREEN}[信息]\${NC} \$1"
 }
 
 log_warn() {
-    echo -e "${YELLOW}[警告]${NC} $1"
+    echo -e "\${YELLOW}[警告]\${NC} \$1"
 }
 
 log_error() {
-    echo -e "${RED}[错误]${NC} $1"
+    echo -e "\${RED}[错误]\${NC} \$1"
 }
 
 show_menu() {
     echo "=== Qdrant 服务管理 ==="
+    echo "版本: \$VERSION"
     echo "1. 查看服务状态"
     echo "2. 启动服务"
     echo "3. 停止服务"
@@ -337,18 +483,19 @@ show_menu() {
     echo "6. 查看资源使用"
     echo "7. 备份数据"
     echo "8. API测试"
-    echo "9. 退出"
+    echo "9. 更新镜像"
+    echo "10. 退出"
     echo
 }
 
 check_status() {
     log_info "检查Qdrant服务状态..."
     
-    if docker ps | grep -q "$CONTAINER_NAME"; then
+    if docker ps | grep -q "\$CONTAINER_NAME"; then
         log_info "✓ 服务运行正常"
-        docker ps | grep "$CONTAINER_NAME"
+        docker ps | grep "\$CONTAINER_NAME"
         
-        if curl -s "http://localhost:$PORT/health" > /dev/null; then
+        if curl -s "http://localhost:\$PORT/health" > /dev/null; then
             log_info "✓ API服务正常"
         else
             log_warn "⚠ API服务异常"
@@ -360,70 +507,88 @@ check_status() {
 
 start_service() {
     log_info "启动Qdrant服务..."
-    docker start "$CONTAINER_NAME"
+    docker start "\$CONTAINER_NAME"
     sleep 3
     check_status
 }
 
 stop_service() {
     log_info "停止Qdrant服务..."
-    docker stop "$CONTAINER_NAME"
+    docker stop "\$CONTAINER_NAME"
     log_info "服务已停止"
 }
 
 restart_service() {
     log_info "重启Qdrant服务..."
-    docker restart "$CONTAINER_NAME"
+    docker restart "\$CONTAINER_NAME"
     sleep 3
     check_status
 }
 
 show_logs() {
     log_info "显示Qdrant日志（最近50行）..."
-    docker logs "$CONTAINER_NAME" --tail 50 -f
+    docker logs "\$CONTAINER_NAME" --tail 50 -f
 }
 
 show_stats() {
     log_info "显示资源使用情况..."
-    docker stats "$CONTAINER_NAME" --no-stream
+    docker stats "\$CONTAINER_NAME" --no-stream
 }
 
 backup_data() {
     local backup_dir="/opt/qdrant/backups"
-    local timestamp=$(date +%Y%m%d-%H%M%S)
-    local backup_file="qdrant-backup-$timestamp.tar.gz"
+    local timestamp=\$(date +%Y%m%d-%H%M%S)
+    local backup_file="qdrant-backup-\$timestamp.tar.gz"
     
     log_info "创建数据备份..."
     
-    sudo mkdir -p "$backup_dir"
-    sudo tar -czf "$backup_dir/$backup_file" -C /opt/qdrant data
+    sudo mkdir -p "\$backup_dir"
+    sudo tar -czf "\$backup_dir/\$backup_file" -C /opt/qdrant data
     
-    log_info "备份完成: $backup_dir/$backup_file"
-    log_info "备份大小: $(du -h $backup_dir/$backup_file | cut -f1)"
+    log_info "备份完成: \$backup_dir/\$backup_file"
+    log_info "备份大小: \$(du -h \$backup_dir/\$backup_file | cut -f1)"
 }
 
 api_test() {
     log_info "执行API测试..."
     
     echo "1. 服务信息:"
-    curl -s "http://localhost:$PORT/" | python3 -m json.tool 2>/dev/null || echo "API请求失败"
+    curl -s "http://localhost:\$PORT/" | python3 -m json.tool 2>/dev/null || echo "API请求失败"
     
     echo -e "\n2. 健康检查:"
-    curl -s "http://localhost:$PORT/health" || echo "健康检查失败"
+    curl -s "http://localhost:\$PORT/health" || echo "健康检查失败"
     
     echo -e "\n3. 集合列表:"
-    curl -s "http://localhost:$PORT/collections" | python3 -m json.tool 2>/dev/null || echo "集合API请求失败"
+    curl -s "http://localhost:\$PORT/collections" | python3 -m json.tool 2>/dev/null || echo "集合API请求失败"
     
     echo -e "\n4. 集群信息:"
-    curl -s "http://localhost:$PORT/cluster" | python3 -m json.tool 2>/dev/null || echo "集群API请求失败"
+    curl -s "http://localhost:\$PORT/cluster" | python3 -m json.tool 2>/dev/null || echo "集群API请求失败"
+}
+
+update_image() {
+    log_info "更新Qdrant镜像..."
+    
+    log_warn "这将停止当前服务并更新到最新版本"
+    read -p "确认继续？(y/N): " confirm
+    
+    if [[ "\$confirm" == "y" || "\$confirm" == "Y" ]]; then
+        docker stop "\$CONTAINER_NAME"
+        docker rm "\$CONTAINER_NAME"
+        docker pull "qdrant/qdrant:\$VERSION"
+        
+        # 重新启动容器（这里需要使用原始启动参数）
+        log_info "请手动重新运行部署脚本来启动新版本"
+    else
+        log_info "取消更新"
+    fi
 }
 
 main() {
     while true; do
         show_menu
-        read -p "请选择操作 (1-9): " choice
+        read -p "请选择操作 (1-10): " choice
         
-        case $choice in
+        case \$choice in
             1) check_status ;;
             2) start_service ;;
             3) stop_service ;;
@@ -432,7 +597,8 @@ main() {
             6) show_stats ;;
             7) backup_data ;;
             8) api_test ;;
-            9) 
+            9) update_image ;;
+            10) 
                 log_info "退出管理工具"
                 break
                 ;;
@@ -447,7 +613,7 @@ main() {
     done
 }
 
-main "$@"
+main "\$@"
 EOF
     
     chmod +x "./qdrant-manage.sh"
@@ -464,8 +630,12 @@ main() {
         exit 1
     fi
     
+    # 选择版本
+    select_version
+    
     # 执行部署步骤
     check_docker
+    configure_docker_mirrors
     check_ports
     create_directories
     create_config
@@ -482,7 +652,7 @@ main() {
     show_deployment_info
     
     log_title "=== 部署完成 ==="
-    log_info "Qdrant向量数据库部署成功！"
+    log_info "Qdrant向量数据库 $QDRANT_VERSION 部署成功！"
     log_info "使用 ./qdrant-manage.sh 来管理服务"
 }
 
