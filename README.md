@@ -137,6 +137,23 @@ sudo ./install.sh
 journalctl -u docker.service
 ```
 
+
+```
+
+# 检查 Docker 版本
+docker --version
+
+# 检查 Docker 服务状态
+sudo systemctl status docker
+
+# 查看镜像源配置
+cat /etc/docker/daemon.json
+
+# 测试镜像拉取
+docker run --rm hello-world
+
+```
+
 ## 卸载说明
 
 使用卸载脚本会：

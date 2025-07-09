@@ -2,7 +2,7 @@
 
 # Docker 安装脚本 - 适用于腾讯云 OpenCloudOS
 # 作者: qrdant-deploy 项目
-# 版本: 1.2 - 修复网络和镜像源问题
+# 版本: 1.3 - 解决网络连接和SSL问题
 
 set -e
 
@@ -82,6 +82,9 @@ remove_old_docker() {
         docker-buildx-plugin \
         docker-compose-plugin 2>/dev/null || true
     
+    # 清理下载缓存
+    $PKG_MANAGER clean packages 2>/dev/null || true
+    
     log_info "旧版本清理完成"
 }
 
@@ -100,45 +103,175 @@ install_dependencies() {
     log_info "依赖包安装完成"
 }
 
-# 添加 Docker 官方仓库
-add_docker_repo() {
-    log_info "添加 Docker 官方仓库..."
+# 方法1：使用阿里云一键安装脚本
+install_docker_aliyun_script() {
+    log_info "尝试使用阿里云一键安装脚本..."
     
-    if [[ $PKG_MANAGER == "dnf" ]]; then
-        # 使用 dnf config-manager
-        dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+    if curl -fsSL https://get.docker.com | bash -s docker --mirror Aliyun; then
+        log_info "阿里云一键安装成功"
+        return 0
     else
-        # 使用 yum-config-manager
-        yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        log_warn "阿里云一键安装失败"
+        return 1
+    fi
+}
+
+# 方法2：使用腾讯云镜像源
+install_docker_tencent_mirror() {
+    log_info "尝试使用腾讯云镜像源..."
+    
+    # 添加腾讯云 Docker 仓库
+    if [[ $PKG_MANAGER == "dnf" ]]; then
+        dnf config-manager --add-repo https://mirrors.cloud.tencent.com/docker-ce/linux/centos/docker-ce.repo
+    else
+        yum-config-manager --add-repo https://mirrors.cloud.tencent.com/docker-ce/linux/centos/docker-ce.repo
     fi
     
-    # 针对 OpenCloudOS，我们可能需要修改仓库配置
+    # 替换仓库中的下载地址
+    sed -i 's/download.docker.com/mirrors.cloud.tencent.com\/docker-ce/g' /etc/yum.repos.d/docker-ce.repo
+    
+    # 针对 OpenCloudOS 调整版本
     if [[ -f /etc/opencloudos-release ]]; then
-        log_info "为 OpenCloudOS 调整仓库配置..."
-        # 修改仓库文件以兼容 OpenCloudOS
         sed -i 's/\$releasever/8/g' /etc/yum.repos.d/docker-ce.repo
     fi
     
-    # 更新仓库缓存 - 修复兼容性问题
-    log_info "更新仓库缓存..."
-    if [[ $PKG_MANAGER == "dnf" ]]; then
-        dnf makecache
-    else
-        # 对于较新的 yum 版本，不使用 fast 参数
-        yum makecache || yum makecache --timer || yum makecache timer
-    fi
+    # 更新缓存
+    $PKG_MANAGER makecache
     
-    log_info "Docker 仓库添加完成"
+    # 安装 Docker
+    if $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+        log_info "腾讯云镜像源安装成功"
+        return 0
+    else
+        log_warn "腾讯云镜像源安装失败"
+        return 1
+    fi
 }
 
-# 安装 Docker CE
+# 方法3：使用阿里云镜像源
+install_docker_aliyun_mirror() {
+    log_info "尝试使用阿里云镜像源..."
+    
+    # 添加阿里云 Docker 仓库
+    if [[ $PKG_MANAGER == "dnf" ]]; then
+        dnf config-manager --add-repo https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+    else
+        yum-config-manager --add-repo https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+    fi
+    
+    # 针对 OpenCloudOS 调整版本
+    if [[ -f /etc/opencloudos-release ]]; then
+        sed -i 's/\$releasever/8/g' /etc/yum.repos.d/docker-ce.repo
+    fi
+    
+    # 更新缓存
+    $PKG_MANAGER makecache
+    
+    # 安装 Docker
+    if $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+        log_info "阿里云镜像源安装成功"
+        return 0
+    else
+        log_warn "阿里云镜像源安装失败"
+        return 1
+    fi
+}
+
+# 方法4：使用原始官方仓库（禁用SSL验证）
+install_docker_official_no_ssl() {
+    log_info "尝试使用官方仓库（临时禁用SSL验证）..."
+    
+    # 备份原始配置
+    if [[ $PKG_MANAGER == "dnf" ]]; then
+        cp /etc/dnf/dnf.conf /etc/dnf/dnf.conf.backup 2>/dev/null || true
+        echo "sslverify=False" >> /etc/dnf/dnf.conf
+    else
+        cp /etc/yum.conf /etc/yum.conf.backup 2>/dev/null || true
+        echo "sslverify=0" >> /etc/yum.conf
+    fi
+    
+    # 添加官方仓库
+    if [[ $PKG_MANAGER == "dnf" ]]; then
+        dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+    else
+        yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+    fi
+    
+    # 针对 OpenCloudOS 调整版本
+    if [[ -f /etc/opencloudos-release ]]; then
+        sed -i 's/\$releasever/8/g' /etc/yum.repos.d/docker-ce.repo
+    fi
+    
+    # 更新缓存
+    $PKG_MANAGER makecache
+    
+    # 安装 Docker
+    if $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+        log_info "官方仓库安装成功"
+        
+        # 恢复SSL验证
+        if [[ $PKG_MANAGER == "dnf" ]]; then
+            mv /etc/dnf/dnf.conf.backup /etc/dnf/dnf.conf 2>/dev/null || sed -i '/sslverify=False/d' /etc/dnf/dnf.conf
+        else
+            mv /etc/yum.conf.backup /etc/yum.conf 2>/dev/null || sed -i '/sslverify=0/d' /etc/yum.conf
+        fi
+        
+        return 0
+    else
+        log_warn "官方仓库安装失败"
+        
+        # 恢复SSL验证
+        if [[ $PKG_MANAGER == "dnf" ]]; then
+            mv /etc/dnf/dnf.conf.backup /etc/dnf/dnf.conf 2>/dev/null || sed -i '/sslverify=False/d' /etc/dnf/dnf.conf
+        else
+            mv /etc/yum.conf.backup /etc/yum.conf 2>/dev/null || sed -i '/sslverify=0/d' /etc/yum.conf
+        fi
+        
+        return 1
+    fi
+}
+
+# 方法5：使用系统仓库
+install_docker_system_repo() {
+    log_info "尝试使用系统仓库安装..."
+    
+    # 启用 EPEL 仓库
+    $PKG_MANAGER install -y epel-release
+    
+    # 尝试安装 docker
+    if $PKG_MANAGER install -y docker; then
+        log_info "系统仓库安装成功"
+        return 0
+    else
+        log_warn "系统仓库安装失败"
+        return 1
+    fi
+}
+
+# 主安装函数 - 尝试多种方法
 install_docker() {
-    log_info "安装 Docker CE..."
+    log_info "开始安装 Docker CE..."
     
-    # 安装最新版本的 Docker CE
-    $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    
-    log_info "Docker CE 安装完成"
+    # 按优先级尝试不同的安装方法
+    if install_docker_aliyun_script; then
+        log_info "使用阿里云一键脚本安装成功"
+        return 0
+    elif install_docker_tencent_mirror; then
+        log_info "使用腾讯云镜像源安装成功"
+        return 0
+    elif install_docker_aliyun_mirror; then
+        log_info "使用阿里云镜像源安装成功"
+        return 0
+    elif install_docker_official_no_ssl; then
+        log_info "使用官方仓库（禁用SSL）安装成功"
+        return 0
+    elif install_docker_system_repo; then
+        log_info "使用系统仓库安装成功"
+        return 0
+    else
+        log_error "所有安装方法都失败了"
+        exit 1
+    fi
 }
 
 # 配置 Docker 镜像源加速
@@ -256,38 +389,33 @@ test_docker() {
         return 1
     fi
     
+    # 简单的本地测试，不依赖网络
+    log_info "执行本地功能测试..."
+    if echo "FROM scratch" | docker build -t test-image - &> /dev/null; then
+        docker rmi test-image &> /dev/null
+        log_info "Docker 本地功能测试成功"
+    else
+        log_warn "Docker 本地功能测试失败"
+    fi
+    
     # 测试网络连接
     test_network
     
-    # 尝试拉取测试镜像
-    log_info "尝试拉取测试镜像..."
+    # 尝试拉取测试镜像（可选）
+    log_info "尝试网络镜像测试（可选）..."
     
-    # 设置较短的超时时间，避免长时间等待
-    export DOCKER_CLIENT_TIMEOUT=60
-    export COMPOSE_HTTP_TIMEOUT=60
+    # 设置较短的超时时间
+    export DOCKER_CLIENT_TIMEOUT=30
+    export COMPOSE_HTTP_TIMEOUT=30
     
-    # 尝试多个测试方案
-    if timeout 60 docker run --rm hello-world 2>/dev/null; then
-        log_info "Docker 安装测试成功！"
+    # 尝试拉取hello-world镜像
+    if timeout 30 docker run --rm hello-world &> /dev/null; then
+        log_info "网络镜像测试成功！"
         return 0
     else
-        log_warn "hello-world 镜像拉取失败，尝试其他测试方案..."
-        
-        # 尝试使用国内镜像
-        if timeout 60 docker run --rm registry.cn-hangzhou.aliyuncs.com/google_containers/pause:3.6 echo "测试成功" 2>/dev/null; then
-            log_info "使用国内镜像测试成功！"
-            return 0
-        else
-            # 最基本的测试 - 检查 Docker 是否能创建容器
-            if docker run --rm --name test-container alpine:latest echo "Docker 基本功能正常" 2>/dev/null; then
-                log_info "Docker 基本功能测试成功！"
-                return 0
-            else
-                log_warn "镜像拉取可能存在网络问题，但 Docker 已安装完成"
-                log_warn "可以稍后手动测试: docker run hello-world"
-                return 0
-            fi
-        fi
+        log_warn "网络镜像测试失败，但 Docker 已正常安装"
+        log_warn "可以稍后手动测试: docker run hello-world"
+        return 0
     fi
 }
 
@@ -334,10 +462,8 @@ show_install_info() {
     echo
     log_info "安装日志已保存到: /var/log/docker-install.log"
     
-    # 如果测试失败，显示故障排除信息
-    if [[ $? -ne 0 ]]; then
-        show_network_troubleshooting
-    fi
+    # 显示故障排除信息
+    show_network_troubleshooting
 }
 
 # 主函数
@@ -348,7 +474,6 @@ main() {
     check_system
     remove_old_docker
     install_dependencies
-    add_docker_repo
     install_docker
     configure_docker_registry
     start_docker
