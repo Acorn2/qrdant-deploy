@@ -37,6 +37,8 @@ cd qdrant-deploy
 
 # 执行部署脚本
 sudo bash deploy-qdrant.sh
+
+sudo bash deploy-qdrant-enhanced.sh
 ```
 
 **特点：**
