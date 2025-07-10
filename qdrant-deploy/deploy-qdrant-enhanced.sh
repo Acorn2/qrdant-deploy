@@ -2,7 +2,7 @@
 
 # Qdrant 向量数据库增强部署脚本
 # 适用于网络受限环境的多种部署方案
-# 版本: 2.0 - 增加离线部署和替代方案
+# 版本: 2.1 - 修复离线部署缺失容器启动问题
 
 set -e
 
@@ -175,7 +175,7 @@ try_with_proxy() {
     return 1
 }
 
-# 方案2：离线部署
+# 方案2：离线部署（修复版）
 offline_deploy() {
     log_step "执行离线部署..."
     
@@ -190,14 +190,14 @@ offline_deploy() {
     read -p "请选择离线部署方式 (1-3): " offline_choice
     
     case $offline_choice in
-        1) deploy_from_tar ;;
-        2) deploy_from_transfer ;;
-        3) deploy_from_image_file ;;
+        1) deploy_from_tar && setup_and_start_container ;;
+        2) deploy_from_transfer && setup_and_start_container ;;
+        3) deploy_from_image_file && setup_and_start_container ;;
         *) log_error "无效选择" && return 1 ;;
     esac
 }
 
-# 从tar包部署
+# 从tar包部署（修复版）
 deploy_from_tar() {
     log_info "从tar包部署Qdrant..."
     
@@ -215,14 +215,23 @@ deploy_from_tar() {
         log_info "加载Docker镜像..."
         docker load < "$tar_path"
         log_info "镜像加载完成"
-        return 0
+        
+        # 验证镜像是否成功加载
+        if docker images | grep -q "qdrant/qdrant"; then
+            log_info "✓ 检测到已加载的Qdrant镜像："
+            docker images | grep qdrant
+            return 0
+        else
+            log_error "✗ 镜像加载后未找到qdrant镜像"
+            return 1
+        fi
     else
         log_error "文件不存在: $tar_path"
         return 1
     fi
 }
 
-# 从其他服务器传输
+# 从其他服务器传输（修复版）
 deploy_from_transfer() {
     log_info "从其他服务器传输镜像..."
     
@@ -243,14 +252,23 @@ deploy_from_transfer() {
         gunzip -c /tmp/qdrant.tar.gz | docker load
         log_info "镜像加载完成"
         rm -f /tmp/qdrant.tar.gz
-        return 0
+        
+        # 验证镜像是否成功加载
+        if docker images | grep -q "qdrant/qdrant"; then
+            log_info "✓ 检测到已加载的Qdrant镜像："
+            docker images | grep qdrant
+            return 0
+        else
+            log_error "✗ 镜像加载后未找到qdrant镜像"
+            return 1
+        fi
     else
         log_error "未找到传输的镜像文件"
         return 1
     fi
 }
 
-# 从镜像文件部署
+# 从镜像文件部署（修复版）
 deploy_from_image_file() {
     log_info "从镜像文件部署..."
     
@@ -274,11 +292,202 @@ deploy_from_image_file() {
         esac
         
         log_info "镜像加载完成"
-        return 0
+        
+        # 验证镜像是否成功加载
+        if docker images | grep -q "qdrant/qdrant"; then
+            log_info "✓ 检测到已加载的Qdrant镜像："
+            docker images | grep qdrant
+            return 0
+        else
+            log_error "✗ 镜像加载后未找到qdrant镜像"
+            return 1
+        fi
     else
         log_error "文件不存在: $image_path"
         return 1
     fi
+}
+
+# 新增：设置和启动容器
+setup_and_start_container() {
+    log_step "设置和启动Qdrant容器..."
+    
+    # 创建必要目录
+    create_directories
+    
+    # 创建配置文件
+    create_config_file
+    
+    # 创建Docker网络
+    create_docker_network
+    
+    # 清理现有容器
+    cleanup_existing_container
+    
+    # 启动容器
+    start_qdrant_container
+    
+    # 等待并验证服务
+    wait_and_verify_service
+    
+    return $?
+}
+
+# 新增：创建目录
+create_directories() {
+    log_info "创建Qdrant数据和配置目录..."
+    
+    sudo mkdir -p "$QDRANT_DATA_DIR" "$QDRANT_CONFIG_DIR"
+    sudo chown -R 1000:1000 "$QDRANT_DATA_DIR" "$QDRANT_CONFIG_DIR"
+    
+    log_info "目录创建完成："
+    log_info "数据目录: $QDRANT_DATA_DIR"
+    log_info "配置目录: $QDRANT_CONFIG_DIR"
+}
+
+# 新增：创建配置文件
+create_config_file() {
+    log_info "创建Qdrant配置文件..."
+    
+    cat > "$QDRANT_CONFIG_DIR/config.yaml" << 'EOF'
+# Qdrant 配置文件 - v1.14.1 兼容
+storage:
+  storage_path: "/qdrant/storage"
+  wal_capacity_mb: 32
+  wal_segments_ahead: 0
+  
+service:
+  host: "0.0.0.0"
+  http_port: 6333
+  grpc_port: 6334
+  enable_cors: true
+  max_request_size_mb: 32
+  max_timeout_seconds: 30
+  
+log_level: "INFO"
+
+hnsw_config:
+  m: 16
+  ef_construct: 100
+  full_scan_threshold: 10000
+  max_indexing_threads: 0
+
+optimizer_config:
+  deleted_threshold: 0.2
+  vacuum_min_vector_number: 1000
+  default_segment_number: 0
+  memmap_threshold: 50000
+  indexing_threshold: 20000
+  flush_interval_sec: 5
+  max_optimization_threads: 1
+
+telemetry_disabled: true
+EOF
+    
+    log_info "配置文件创建完成: $QDRANT_CONFIG_DIR/config.yaml"
+}
+
+# 新增：创建Docker网络
+create_docker_network() {
+    log_info "创建Docker网络..."
+    
+    if ! docker network ls | grep -q "$QDRANT_NETWORK"; then
+        docker network create "$QDRANT_NETWORK"
+        log_info "Docker网络 '$QDRANT_NETWORK' 创建成功"
+    else
+        log_info "Docker网络 '$QDRANT_NETWORK' 已存在"
+    fi
+}
+
+# 新增：清理现有容器
+cleanup_existing_container() {
+    log_info "清理现有Qdrant容器..."
+    
+    if docker ps -a | grep -q "$QDRANT_CONTAINER_NAME"; then
+        log_warn "发现现有容器，正在停止并删除..."
+        docker stop "$QDRANT_CONTAINER_NAME" 2>/dev/null || true
+        docker rm "$QDRANT_CONTAINER_NAME" 2>/dev/null || true
+        log_info "现有容器清理完成"
+    fi
+}
+
+# 新增：启动Qdrant容器
+start_qdrant_container() {
+    log_info "启动Qdrant容器..."
+    
+    # 获取可用的镜像标签
+    local image_info=$(docker images | grep qdrant | head -1)
+    if [[ -z "$image_info" ]]; then
+        log_error "未找到Qdrant镜像"
+        return 1
+    fi
+    
+    local image_tag=$(echo "$image_info" | awk '{print $1":"$2}')
+    log_info "使用镜像: $image_tag"
+    
+    # 启动容器
+    docker run -d \
+        --name "$QDRANT_CONTAINER_NAME" \
+        --network "$QDRANT_NETWORK" \
+        -p "$QDRANT_PORT:6333" \
+        -p "$QDRANT_GRPC_PORT:6334" \
+        -v "$QDRANT_DATA_DIR:/qdrant/storage" \
+        -v "$QDRANT_CONFIG_DIR:/qdrant/config" \
+        --restart unless-stopped \
+        --memory="2g" \
+        --cpus="1.0" \
+        "$image_tag" \
+        ./qdrant --config-path /qdrant/config/config.yaml
+    
+    if [[ $? -eq 0 ]]; then
+        log_info "Qdrant容器启动成功"
+        return 0
+    else
+        log_error "Qdrant容器启动失败"
+        return 1
+    fi
+}
+
+# 新增：等待并验证服务
+wait_and_verify_service() {
+    log_info "等待Qdrant服务启动..."
+    
+    local max_attempts=30
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        log_info "检查服务状态... ($attempt/$max_attempts)"
+        
+        # 检查容器状态
+        if ! docker ps | grep -q "$QDRANT_CONTAINER_NAME"; then
+            log_error "容器未运行，查看启动日志："
+            docker logs "$QDRANT_CONTAINER_NAME" --tail 20
+            return 1
+        fi
+        
+        # 检查API响应
+        if curl -s --connect-timeout 5 "http://localhost:$QDRANT_PORT/health" >/dev/null 2>&1; then
+            log_info "✓ Qdrant服务启动成功！"
+            
+            # 获取版本信息
+            local health_response=$(curl -s "http://localhost:$QDRANT_PORT/health" 2>/dev/null)
+            echo "健康状态: $health_response"
+            
+            local version_info=$(curl -s "http://localhost:$QDRANT_PORT/" 2>/dev/null)
+            echo "版本信息:"
+            echo "$version_info" | python3 -m json.tool 2>/dev/null || echo "$version_info"
+            
+            return 0
+        fi
+        
+        sleep 2
+        ((attempt++))
+    done
+    
+    log_error "Qdrant服务启动超时！"
+    log_info "查看容器日志："
+    docker logs "$QDRANT_CONTAINER_NAME" --tail 20
+    return 1
 }
 
 # 方案3：源码编译部署
@@ -619,22 +828,47 @@ configure_firewall() {
     fi
 }
 
-# 验证安装
+# 修改验证安装函数
 verify_installation() {
     log_info "验证安装..."
     
-    # 等待服务启动
-    sleep 5
-    
-    # 检查服务状态
-    if curl -s "http://localhost:$QDRANT_PORT/health" >/dev/null 2>&1; then
-        log_info "✓ Qdrant服务运行正常"
+    # 检查容器状态
+    if docker ps | grep -q "$QDRANT_CONTAINER_NAME"; then
+        log_info "✓ Docker容器运行正常"
+        
+        # 检查API响应
+        if curl -s --connect-timeout 5 "http://localhost:$QDRANT_PORT/health" >/dev/null 2>&1; then
+            log_info "✓ Qdrant服务运行正常"
+            
+            # 测试基本API
+            local collections_response=$(curl -s "http://localhost:$QDRANT_PORT/collections" 2>/dev/null)
+            log_info "✓ API功能测试通过"
+            
+            return 0
+        else
+            log_warn "⚠ API服务无响应，服务可能还在启动中..."
+            return 1
+        fi
     else
-        log_warn "⚠ 服务可能还在启动中..."
+        log_error "✗ Docker容器未运行"
+        
+        # 检查是否有systemd服务
+        if systemctl list-unit-files | grep -q "qdrant.service"; then
+            local service_status=$(systemctl is-active qdrant 2>/dev/null || echo "inactive")
+            if [[ "$service_status" == "active" ]]; then
+                log_info "✓ 系统服务运行正常"
+                return 0
+            else
+                log_warn "⚠ 系统服务未运行"
+                return 1
+            fi
+        fi
+        
+        return 1
     fi
 }
 
-# 显示部署信息
+# 修改显示部署信息函数
 show_deployment_info() {
     log_title "=== 部署完成 ==="
     
@@ -645,11 +879,18 @@ show_deployment_info() {
     echo
     echo "数据目录: $QDRANT_DATA_DIR"
     echo "配置目录: $QDRANT_CONFIG_DIR"
+    echo
+    echo "验证命令："
+    echo "  查看容器: docker ps | grep qdrant"
+    echo "  查看日志: docker logs $QDRANT_CONTAINER_NAME"
+    echo "  健康检查: curl http://localhost:$QDRANT_PORT/health"
+    echo "  API测试: curl http://localhost:$QDRANT_PORT/"
+    echo "  集合列表: curl http://localhost:$QDRANT_PORT/collections"
 }
 
 # 主菜单循环
 main() {
-    log_title "=== Qdrant 增强部署脚本 v2.0 ==="
+    log_title "=== Qdrant 增强部署脚本 v2.1 ==="
     
     # 检查权限
     if [[ $EUID -ne 0 ]]; then
