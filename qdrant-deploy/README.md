@@ -40,10 +40,12 @@ sudo bash deploy-qdrant.sh
 
 sudo bash deploy-qdrant-enhanced.sh
 
+# 该脚本成功
 sudo bash deploy-qdrant-enhanced-fixed.sh
 
 /my/tool/qdrant-v1.14.1.tar
 
+# 这是正确的tar包
 /my/tool/qdrant.tar
 ```
 
