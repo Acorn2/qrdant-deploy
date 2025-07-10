@@ -175,7 +175,241 @@ try_with_proxy() {
     return 1
 }
 
-# 方案2：离线部署（修复版）
+# 新增：验证Docker镜像tar文件
+validate_docker_tar() {
+    local tar_path="$1"
+    
+    log_info "验证tar文件格式..."
+    
+    # 检查文件是否为tar格式
+    if ! file "$tar_path" | grep -q "tar archive"; then
+        log_error "文件不是有效的tar格式"
+        return 1
+    fi
+    
+    # 检查是否为Docker镜像文件
+    if tar -tf "$tar_path" | grep -q "manifest.json"; then
+        log_info "✓ 检测到Docker镜像文件"
+        return 0
+    else
+        log_warn "✗ 不是Docker镜像文件，可能是其他tar包"
+        
+        # 显示文件内容结构
+        log_info "文件内容预览："
+        tar -tf "$tar_path" | head -10
+        echo "..."
+        
+        return 1
+    fi
+}
+
+# 新增：诊断tar文件问题
+diagnose_tar_file() {
+    local tar_path="$1"
+    
+    log_info "诊断tar文件..."
+    
+    echo "文件信息："
+    echo "  路径: $tar_path"
+    echo "  大小: $(du -h "$tar_path" | cut -f1)"
+    echo "  类型: $(file "$tar_path")"
+    echo
+    
+    log_info "文件内容结构（前20行）："
+    tar -tf "$tar_path" | head -20
+    echo
+    
+    # 检查是否包含特定内容
+    if tar -tf "$tar_path" | grep -q "^qdrant/"; then
+        log_info "检测到这可能是Qdrant二进制程序包"
+        echo "建议使用方案4：二进制文件部署"
+        return 2  # 返回2表示是二进制包
+    elif tar -tf "$tar_path" | grep -q "manifest.json"; then
+        log_info "检测到Docker镜像格式"
+        return 0
+    else
+        log_warn "未识别的tar文件格式"
+        return 1
+    fi
+}
+
+# 新增：从二进制tar包部署
+deploy_from_binary_tar() {
+    local tar_path="$1"
+    
+    log_info "从二进制tar包部署Qdrant..."
+    
+    # 创建临时目录
+    local temp_dir="/tmp/qdrant-binary-$(date +%s)"
+    mkdir -p "$temp_dir"
+    
+    # 解压文件
+    log_info "解压二进制文件..."
+    if tar -xf "$tar_path" -C "$temp_dir"; then
+        log_info "解压完成"
+    else
+        log_error "解压失败"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # 查找qdrant可执行文件
+    local qdrant_binary=""
+    
+    # 常见的可能位置
+    for possible_path in \
+        "$temp_dir/qdrant" \
+        "$temp_dir/qdrant/qdrant" \
+        "$temp_dir/bin/qdrant" \
+        "$temp_dir/*/qdrant"; do
+        
+        if [[ -f "$possible_path" ]] && [[ -x "$possible_path" ]]; then
+            qdrant_binary="$possible_path"
+            break
+        fi
+    done
+    
+    if [[ -z "$qdrant_binary" ]]; then
+        log_error "未找到qdrant可执行文件"
+        log_info "可用的文件："
+        find "$temp_dir" -type f -executable 2>/dev/null || find "$temp_dir" -type f
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    log_info "找到Qdrant二进制文件: $qdrant_binary"
+    
+    # 安装二进制文件
+    log_info "安装Qdrant二进制文件..."
+    sudo mkdir -p /usr/local/bin
+    sudo cp "$qdrant_binary" /usr/local/bin/qdrant
+    sudo chmod +x /usr/local/bin/qdrant
+    
+    # 复制静态资源（如果存在）
+    if [[ -d "$temp_dir/qdrant/static" ]]; then
+        log_info "复制静态资源文件..."
+        sudo mkdir -p /opt/qdrant/static
+        sudo cp -r "$temp_dir/qdrant/static"/* /opt/qdrant/static/ 2>/dev/null || true
+    fi
+    
+    # 清理临时目录
+    rm -rf "$temp_dir"
+    
+    # 验证安装
+    if /usr/local/bin/qdrant --help >/dev/null 2>&1; then
+        log_info "✓ Qdrant二进制文件安装成功"
+        
+        # 创建systemd服务
+        create_systemd_service
+        
+        return 0
+    else
+        log_error "✗ Qdrant二进制文件安装失败"
+        return 1
+    fi
+}
+
+# 修改：从tar包部署（增强版）
+deploy_from_tar() {
+    log_info "从tar包部署Qdrant..."
+    
+    echo "请按以下步骤准备tar包："
+    echo "1. Docker镜像tar包 - 在有网络的机器上执行："
+    echo "   docker pull qdrant/qdrant:$QDRANT_VERSION"
+    echo "   docker save qdrant/qdrant:$QDRANT_VERSION > qdrant-${QDRANT_VERSION}.tar"
+    echo "2. 二进制程序tar包 - 从官方下载或提取"
+    echo "3. 将tar文件传输到此服务器"
+    echo
+    
+    while true; do
+        read -p "请输入tar文件路径: " tar_path
+        
+        if [[ ! -f "$tar_path" ]]; then
+            log_error "文件不存在: $tar_path"
+            read -p "重新输入？(y/n): " retry
+            [[ "$retry" != "y" ]] && return 1
+            continue
+        fi
+        
+        # 验证文件类型
+        if validate_docker_tar "$tar_path"; then
+            # Docker镜像文件
+            log_info "加载Docker镜像..."
+            if docker load < "$tar_path"; then
+                log_info "镜像加载完成"
+                
+                # 验证镜像是否成功加载
+                if docker images | grep -q "qdrant"; then
+                    log_info "✓ 检测到已加载的Qdrant镜像："
+                    docker images | grep qdrant
+                    return 0
+                else
+                    log_error "✗ 镜像加载后未找到qdrant镜像"
+                    return 1
+                fi
+            else
+                log_error "Docker镜像加载失败"
+                return 1
+            fi
+        else
+            # 诊断文件类型
+            local diagnosis_result
+            diagnose_tar_file "$tar_path"
+            diagnosis_result=$?
+            
+            if [[ $diagnosis_result -eq 2 ]]; then
+                # 二进制文件包
+                read -p "检测到二进制文件包，是否使用二进制部署方式？(y/n): " use_binary
+                if [[ "$use_binary" == "y" ]]; then
+                    if deploy_from_binary_tar "$tar_path"; then
+                        # 对于二进制部署，不需要Docker容器，直接启动systemd服务
+                        log_info "二进制部署完成，启动服务..."
+                        systemctl start qdrant
+                        systemctl enable qdrant
+                        
+                        # 等待服务启动
+                        sleep 5
+                        
+                        # 验证服务
+                        if systemctl is-active --quiet qdrant; then
+                            log_info "✓ Qdrant服务启动成功"
+                            return 0
+                        else
+                            log_error "✗ Qdrant服务启动失败"
+                            systemctl status qdrant --no-pager
+                            return 1
+                        fi
+                    else
+                        log_error "二进制部署失败"
+                        return 1
+                    fi
+                else
+                    log_error "用户取消二进制部署"
+                    return 1
+                fi
+            else
+                log_error "无法识别的tar文件格式"
+                echo
+                echo "正确的Docker镜像tar文件应该："
+                echo "1. 包含 manifest.json 文件"
+                echo "2. 由 'docker save' 命令生成"
+                echo
+                echo "如需制作正确的Docker镜像文件，请执行："
+                echo "docker pull qdrant/qdrant:$QDRANT_VERSION"
+                echo "docker save qdrant/qdrant:$QDRANT_VERSION > qdrant-docker.tar"
+                echo
+                
+                read -p "重新输入文件路径？(y/n): " retry
+                [[ "$retry" != "y" ]] && return 1
+                continue
+            fi
+        fi
+        
+        break
+    done
+}
+
+# 修改离线部署函数，更新选项说明
 offline_deploy() {
     log_step "执行离线部署..."
     
@@ -183,52 +417,25 @@ offline_deploy() {
     mkdir -p "$offline_dir"
     
     log_info "离线部署有以下选项："
-    echo "1. 使用预下载的tar包"
-    echo "2. 从其他服务器传输镜像"
+    echo "1. 使用tar包（自动识别Docker镜像或二进制文件）"
+    echo "2. 从其他服务器传输Docker镜像"
     echo "3. 使用镜像文件"
     
     read -p "请选择离线部署方式 (1-3): " offline_choice
     
     case $offline_choice in
-        1) deploy_from_tar && setup_and_start_container ;;
+        1) 
+            if deploy_from_tar; then
+                # 检查是否需要设置Docker容器（如果是Docker镜像部署）
+                if docker images | grep -q "qdrant"; then
+                    setup_and_start_container
+                fi
+            fi
+            ;;
         2) deploy_from_transfer && setup_and_start_container ;;
         3) deploy_from_image_file && setup_and_start_container ;;
         *) log_error "无效选择" && return 1 ;;
     esac
-}
-
-# 从tar包部署（修复版）
-deploy_from_tar() {
-    log_info "从tar包部署Qdrant..."
-    
-    echo "请按以下步骤准备tar包："
-    echo "1. 在有网络的机器上执行："
-    echo "   docker pull qdrant/qdrant:$QDRANT_VERSION"
-    echo "   docker save qdrant/qdrant:$QDRANT_VERSION > qdrant-${QDRANT_VERSION}.tar"
-    echo "2. 将tar文件传输到此服务器"
-    echo "3. 输入tar文件的完整路径"
-    echo
-    
-    read -p "请输入tar文件路径: " tar_path
-    
-    if [[ -f "$tar_path" ]]; then
-        log_info "加载Docker镜像..."
-        docker load < "$tar_path"
-        log_info "镜像加载完成"
-        
-        # 验证镜像是否成功加载
-        if docker images | grep -q "qdrant/qdrant"; then
-            log_info "✓ 检测到已加载的Qdrant镜像："
-            docker images | grep qdrant
-            return 0
-        else
-            log_error "✗ 镜像加载后未找到qdrant镜像"
-            return 1
-        fi
-    else
-        log_error "文件不存在: $tar_path"
-        return 1
-    fi
 }
 
 # 从其他服务器传输（修复版）
@@ -828,47 +1035,49 @@ configure_firewall() {
     fi
 }
 
-# 修改验证安装函数
+# 增强verify_installation函数
 verify_installation() {
     log_info "验证安装..."
     
-    # 检查容器状态
-    if docker ps | grep -q "$QDRANT_CONTAINER_NAME"; then
+    # 检查Docker容器状态
+    if docker ps 2>/dev/null | grep -q "$QDRANT_CONTAINER_NAME"; then
         log_info "✓ Docker容器运行正常"
         
         # 检查API响应
         if curl -s --connect-timeout 5 "http://localhost:$QDRANT_PORT/health" >/dev/null 2>&1; then
-            log_info "✓ Qdrant服务运行正常"
-            
-            # 测试基本API
-            local collections_response=$(curl -s "http://localhost:$QDRANT_PORT/collections" 2>/dev/null)
-            log_info "✓ API功能测试通过"
-            
+            log_info "✓ Qdrant Docker服务运行正常"
             return 0
         else
-            log_warn "⚠ API服务无响应，服务可能还在启动中..."
+            log_warn "⚠ Docker API服务无响应，服务可能还在启动中..."
             return 1
         fi
-    else
-        log_error "✗ Docker容器未运行"
-        
-        # 检查是否有systemd服务
-        if systemctl list-unit-files | grep -q "qdrant.service"; then
-            local service_status=$(systemctl is-active qdrant 2>/dev/null || echo "inactive")
-            if [[ "$service_status" == "active" ]]; then
-                log_info "✓ 系统服务运行正常"
+    fi
+    
+    # 检查systemd服务（二进制部署）
+    if systemctl list-unit-files 2>/dev/null | grep -q "qdrant.service"; then
+        local service_status=$(systemctl is-active qdrant 2>/dev/null || echo "inactive")
+        if [[ "$service_status" == "active" ]]; then
+            log_info "✓ Qdrant系统服务运行正常"
+            
+            # 检查API响应
+            if curl -s --connect-timeout 5 "http://localhost:$QDRANT_PORT/health" >/dev/null 2>&1; then
+                log_info "✓ Qdrant二进制服务API正常"
                 return 0
             else
-                log_warn "⚠ 系统服务未运行"
+                log_warn "⚠ 二进制服务API无响应"
                 return 1
             fi
+        else
+            log_warn "⚠ Qdrant系统服务未运行"
+            return 1
         fi
-        
-        return 1
     fi
+    
+    log_error "✗ 未检测到Qdrant服务"
+    return 1
 }
 
-# 修改显示部署信息函数
+# 增强show_deployment_info函数
 show_deployment_info() {
     log_title "=== 部署完成 ==="
     
@@ -880,9 +1089,23 @@ show_deployment_info() {
     echo "数据目录: $QDRANT_DATA_DIR"
     echo "配置目录: $QDRANT_CONFIG_DIR"
     echo
-    echo "验证命令："
-    echo "  查看容器: docker ps | grep qdrant"
-    echo "  查看日志: docker logs $QDRANT_CONTAINER_NAME"
+    
+    # 检查部署方式
+    if docker ps 2>/dev/null | grep -q "$QDRANT_CONTAINER_NAME"; then
+        echo "部署方式: Docker容器"
+        echo "验证命令："
+        echo "  查看容器: docker ps | grep qdrant"
+        echo "  查看日志: docker logs $QDRANT_CONTAINER_NAME"
+    elif systemctl list-unit-files 2>/dev/null | grep -q "qdrant.service"; then
+        echo "部署方式: 系统服务（二进制）"
+        echo "验证命令："
+        echo "  查看服务: systemctl status qdrant"
+        echo "  查看日志: journalctl -u qdrant -f"
+        echo "  二进制位置: /usr/local/bin/qdrant"
+    fi
+    
+    echo
+    echo "通用验证命令："
     echo "  健康检查: curl http://localhost:$QDRANT_PORT/health"
     echo "  API测试: curl http://localhost:$QDRANT_PORT/"
     echo "  集合列表: curl http://localhost:$QDRANT_PORT/collections"

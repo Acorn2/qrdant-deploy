@@ -39,6 +39,8 @@ cd qdrant-deploy
 sudo bash deploy-qdrant.sh
 
 sudo bash deploy-qdrant-enhanced.sh
+
+/my/tool/qdrant-v1.14.1.tar
 ```
 
 **特点：**
