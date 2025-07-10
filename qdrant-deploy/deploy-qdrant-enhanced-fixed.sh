@@ -224,7 +224,7 @@ deploy_from_binary_tar() {
     fi
 }
 
-# 修复：从tar包部署（完全重写）
+# 修复：从tar包部署（增强的镜像检测逻辑）
 deploy_from_tar() {
     log_info "=== 从tar包部署Qdrant ==="
     
@@ -257,21 +257,87 @@ deploy_from_tar() {
         0)
             # Docker镜像文件
             log_info "=== 使用Docker镜像部署方式 ==="
+            
+            # 获取加载前的镜像列表
+            local images_before=$(docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" 2>/dev/null || echo "")
+            
             log_info "加载Docker镜像..."
-            if docker load < "$tar_path"; then
+            local load_output
+            if load_output=$(docker load < "$tar_path" 2>&1); then
                 log_info "✓ 镜像加载完成"
+                echo "$load_output"
                 
-                # 验证镜像是否成功加载
+                # 获取加载后的镜像列表
+                local images_after=$(docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" 2>/dev/null || echo "")
+                
+                # 检查是否有带qdrant标签的镜像
                 if docker images | grep -q "qdrant"; then
                     log_info "✓ 检测到已加载的Qdrant镜像："
                     docker images | grep qdrant
                     return 0
                 else
-                    log_error "✗ 镜像加载后未找到qdrant镜像"
+                    # 尝试找到新加载的镜像
+                    log_info "未找到qdrant标签的镜像，检查新加载的镜像..."
+                    
+                    # 显示所有镜像，让用户识别
+                    log_info "当前所有Docker镜像："
+                    docker images
+                    
+                    # 从加载输出中提取镜像ID
+                    local loaded_image_id=""
+                    if echo "$load_output" | grep -q "Loaded image ID:"; then
+                        loaded_image_id=$(echo "$load_output" | grep "Loaded image ID:" | sed 's/.*sha256://')
+                        log_info "检测到加载的镜像ID: $loaded_image_id"
+                        
+                        # 为镜像添加标签
+                        log_info "为镜像添加qdrant标签..."
+                        if docker tag "$loaded_image_id" "qdrant/qdrant:latest"; then
+                            log_info "✓ 成功添加标签 qdrant/qdrant:latest"
+                            log_info "验证镜像："
+                            docker images | grep qdrant
+                            return 0
+                        else
+                            log_error "✗ 添加标签失败"
+                        fi
+                    elif echo "$load_output" | grep -q "Loaded image:"; then
+                        # 镜像已有标签
+                        loaded_image_id=$(echo "$load_output" | grep "Loaded image:" | awk '{print $3}')
+                        log_info "检测到已标记的镜像: $loaded_image_id"
+                        
+                        # 如果不是qdrant标签，添加一个
+                        if ! echo "$loaded_image_id" | grep -q "qdrant"; then
+                            log_info "为镜像添加qdrant标签..."
+                            if docker tag "$loaded_image_id" "qdrant/qdrant:latest"; then
+                                log_info "✓ 成功添加标签 qdrant/qdrant:latest"
+                                return 0
+                            fi
+                        else
+                            log_info "✓ 镜像已具有qdrant标签"
+                            return 0
+                        fi
+                    fi
+                    
+                    # 如果以上都失败，让用户手动选择
+                    log_warn "自动识别失败，需要手动指定镜像"
+                    echo "请从上面的镜像列表中找到Qdrant镜像"
+                    read -p "请输入镜像ID或名称（如果看到可疑的镜像）: " user_image
+                    
+                    if [[ -n "$user_image" ]]; then
+                        log_info "尝试为镜像 $user_image 添加qdrant标签..."
+                        if docker tag "$user_image" "qdrant/qdrant:latest"; then
+                            log_info "✓ 成功添加标签"
+                            return 0
+                        else
+                            log_error "✗ 添加标签失败"
+                        fi
+                    fi
+                    
+                    log_error "✗ 镜像加载后未能正确设置qdrant标签"
                     return 1
                 fi
             else
                 log_error "✗ Docker镜像加载失败"
+                echo "$load_output"
                 return 1
             fi
             ;;
@@ -312,6 +378,115 @@ deploy_from_tar() {
             fi
             ;;
     esac
+}
+
+# 新增：设置和启动容器的函数
+setup_and_start_container() {
+    log_info "=== 设置和启动Qdrant容器 ==="
+    
+    # 停止并删除已存在的容器
+    if docker ps -a | grep -q "$QDRANT_CONTAINER_NAME"; then
+        log_info "停止并删除已存在的容器..."
+        docker stop "$QDRANT_CONTAINER_NAME" 2>/dev/null || true
+        docker rm "$QDRANT_CONTAINER_NAME" 2>/dev/null || true
+    fi
+    
+    # 创建网络（如果不存在）
+    if ! docker network ls | grep -q "$QDRANT_NETWORK"; then
+        log_info "创建Docker网络: $QDRANT_NETWORK"
+        docker network create "$QDRANT_NETWORK" 2>/dev/null || true
+    fi
+    
+    # 创建数据目录
+    log_info "创建数据目录..."
+    mkdir -p "$QDRANT_DATA_DIR"
+    
+    # 启动容器
+    log_info "启动Qdrant容器..."
+    
+    local qdrant_image="qdrant/qdrant:latest"
+    
+    # 检查镜像是否存在
+    if ! docker images | grep -q "qdrant"; then
+        log_error "未找到qdrant镜像"
+        return 1
+    fi
+    
+    # 使用找到的第一个qdrant镜像
+    qdrant_image=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep qdrant | head -1)
+    log_info "使用镜像: $qdrant_image"
+    
+    if docker run -d \
+        --name "$QDRANT_CONTAINER_NAME" \
+        --network "$QDRANT_NETWORK" \
+        -p "$QDRANT_PORT:6333" \
+        -p "$QDRANT_GRPC_PORT:6334" \
+        -v "$QDRANT_DATA_DIR:/qdrant/storage" \
+        --restart unless-stopped \
+        "$qdrant_image"; then
+        
+        log_info "✓ 容器启动成功"
+        
+        # 等待服务启动
+        log_info "等待服务启动..."
+        sleep 10
+        
+        # 验证服务
+        if docker ps | grep -q "$QDRANT_CONTAINER_NAME"; then
+            log_info "✓ Qdrant容器运行正常"
+            return 0
+        else
+            log_error "✗ 容器启动失败"
+            docker logs "$QDRANT_CONTAINER_NAME"
+            return 1
+        fi
+    else
+        log_error "✗ 容器启动失败"
+        return 1
+    fi
+}
+
+# 新增：部署后设置函数
+post_deployment_setup() {
+    log_info "=== 部署后设置 ==="
+    
+    # 检查服务状态
+    log_info "检查Qdrant服务状态..."
+    
+    # 等待一段时间让服务完全启动
+    sleep 5
+    
+    # 测试HTTP API
+    log_info "测试Qdrant HTTP API..."
+    if curl -s "http://localhost:$QDRANT_PORT/health" | grep -q "ok"; then
+        log_info "✓ HTTP API响应正常"
+    else
+        log_warn "⚠ HTTP API测试失败，服务可能还在启动中"
+    fi
+    
+    # 显示访问信息
+    log_info "=== 部署完成 ==="
+    echo "Qdrant服务信息："
+    echo "  HTTP API: http://localhost:$QDRANT_PORT"
+    echo "  gRPC API: http://localhost:$QDRANT_GRPC_PORT"
+    echo "  管理界面: http://localhost:$QDRANT_PORT/dashboard"
+    echo "  数据目录: $QDRANT_DATA_DIR"
+    echo
+    echo "常用命令："
+    if docker ps 2>/dev/null | grep -q "$QDRANT_CONTAINER_NAME"; then
+        echo "  查看容器状态: docker ps | grep qdrant"
+        echo "  查看日志: docker logs $QDRANT_CONTAINER_NAME"
+        echo "  停止服务: docker stop $QDRANT_CONTAINER_NAME"
+        echo "  重启服务: docker restart $QDRANT_CONTAINER_NAME"
+    elif systemctl is-active --quiet qdrant 2>/dev/null; then
+        echo "  查看服务状态: systemctl status qdrant"
+        echo "  查看日志: journalctl -u qdrant -f"
+        echo "  停止服务: systemctl stop qdrant"
+        echo "  重启服务: systemctl restart qdrant"
+    fi
+    echo
+    
+    log_info "部署完成！"
 }
 
 # 创建systemd服务

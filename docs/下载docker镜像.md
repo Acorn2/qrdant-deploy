@@ -8,6 +8,11 @@ brew install skopeo
 
 brew uninstall skopeo
 
+# 强制下载Linux amd64版本（适用于大多数云服务器），成功了
+skopeo copy --override-os linux --override-arch amd64 \
+    docker://qdrant/qdrant:latest \
+    docker-archive:qdrant.tar
+
 # 直接下载镜像为tar格式
 skopeo copy docker://qdrant/qdrant:latest docker-archive:qdrant-latest.tar
 
@@ -34,6 +39,8 @@ ls -lh qdrant-*.tar
 ```
 # 1. 先安装crane（更稳定的工具）
 brew install crane
+
+brew uninstall crane
 
 # 2. 检查镜像支持的平台
 crane manifest qdrant/qdrant:v1.14.1
