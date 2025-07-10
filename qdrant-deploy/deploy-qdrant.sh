@@ -51,245 +51,189 @@ REGISTRY_MIRRORS=(
     "hub-mirror.c.163.com"  # 网易镜像
 )
 
-# 显示版本选择菜单
-show_version_menu() {
-    log_title "选择 Qdrant 版本"
-    echo "可用版本（从新到旧）："
-    for i in "${!AVAILABLE_VERSIONS[@]}"; do
-        if [[ $i -eq 0 ]]; then
-            echo "$((i+1)). ${AVAILABLE_VERSIONS[$i]} (推荐最新版)"
-        else
-            echo "$((i+1)). ${AVAILABLE_VERSIONS[$i]}"
-        fi
-    done
-    echo "$((${#AVAILABLE_VERSIONS[@]}+1)). 自定义版本"
+# 在脚本开头添加tar文件路径变量
+QDRANT_TAR_FILE=""
+
+# 在select_version函数之后添加新的函数
+# 选择镜像获取方式
+select_image_source() {
+    log_title "选择镜像获取方式"
+    echo "1. 在线拉取镜像（默认）"
+    echo "2. 从tar文件导入镜像"
     echo
+    
+    while true; do
+        read -p "请选择镜像获取方式 (1-2) [默认: 1]: " source_choice
+        
+        # 默认选择在线拉取
+        if [[ -z "$source_choice" ]]; then
+            source_choice=1
+        fi
+        
+        case $source_choice in
+            1)
+                log_info "已选择在线拉取镜像"
+                QDRANT_TAR_FILE=""
+                break
+                ;;
+            2)
+                log_info "已选择从tar文件导入镜像"
+                select_tar_file
+                break
+                ;;
+            *)
+                log_error "无效的选择，请重新输入"
+                ;;
+        esac
+    done
 }
 
-# 选择版本
-select_version() {
+# 选择tar文件
+select_tar_file() {
     while true; do
-        show_version_menu
-        read -p "请选择版本 (1-$((${#AVAILABLE_VERSIONS[@]}+1))) [默认: 1]: " choice
+        read -p "请输入Qdrant镜像tar文件的完整路径: " tar_path
         
-        # 默认选择第一个版本（最新版本）
-        if [[ -z "$choice" ]]; then
-            choice=1
+        if [[ -z "$tar_path" ]]; then
+            log_error "文件路径不能为空"
+            continue
         fi
         
-        if [[ "$choice" -ge 1 && "$choice" -le ${#AVAILABLE_VERSIONS[@]} ]]; then
-            QDRANT_VERSION="${AVAILABLE_VERSIONS[$((choice-1))]}"
-            log_info "已选择版本: $QDRANT_VERSION"
-            break
-        elif [[ "$choice" -eq $((${#AVAILABLE_VERSIONS[@]}+1)) ]]; then
-            read -p "请输入自定义版本 (如 v1.14.0): " custom_version
-            if [[ -n "$custom_version" ]]; then
-                QDRANT_VERSION="$custom_version"
-                log_info "已选择自定义版本: $QDRANT_VERSION"
-                break
+        # 检查文件是否存在
+        if [[ ! -f "$tar_path" ]]; then
+            log_error "文件不存在: $tar_path"
+            continue
+        fi
+        
+        # 检查文件扩展名
+        if [[ ! "$tar_path" =~ \.(tar|tar\.gz|tgz)$ ]]; then
+            log_warn "文件扩展名不是标准的tar格式，但将尝试导入"
+        fi
+        
+        QDRANT_TAR_FILE="$tar_path"
+        log_info "已选择tar文件: $QDRANT_TAR_FILE"
+        break
+    done
+}
+
+# 从tar文件导入镜像
+import_image_from_tar() {
+    log_info "从tar文件导入Qdrant镜像..."
+    
+    if [[ -z "$QDRANT_TAR_FILE" ]]; then
+        log_error "未指定tar文件路径"
+        return 1
+    fi
+    
+    if [[ ! -f "$QDRANT_TAR_FILE" ]]; then
+        log_error "tar文件不存在: $QDRANT_TAR_FILE"
+        return 1
+    fi
+    
+    log_info "正在导入镜像文件: $QDRANT_TAR_FILE"
+    log_info "文件大小: $(du -h "$QDRANT_TAR_FILE" | cut -f1)"
+    
+    # 导入镜像
+    if docker load -i "$QDRANT_TAR_FILE"; then
+        log_info "✓ 镜像导入成功！"
+        
+        # 显示导入的镜像
+        log_info "已导入的镜像："
+        docker images | grep qdrant | head -5
+        
+        # 检查是否需要重新标记镜像
+        check_and_retag_image
+        
+        return 0
+    else
+        log_error "✗ 镜像导入失败！"
+        return 1
+    fi
+}
+
+# 检查并重新标记镜像
+check_and_retag_image() {
+    log_info "检查镜像标签..."
+    
+    local target_image="qdrant/qdrant:$QDRANT_VERSION"
+    
+    # 检查目标镜像是否存在
+    if docker images | grep -q "qdrant/qdrant" | grep -q "${QDRANT_VERSION#v}"; then
+        log_info "✓ 找到目标镜像: $target_image"
+        return 0
+    fi
+    
+    # 查找可用的qdrant镜像
+    local available_images
+    available_images=$(docker images | grep qdrant | awk '{print $1":"$2}')
+    
+    if [[ -z "$available_images" ]]; then
+        log_error "未找到任何qdrant镜像"
+        return 1
+    fi
+    
+    log_info "找到以下qdrant镜像："
+    echo "$available_images"
+    echo
+    
+    # 如果只有一个镜像，询问是否重新标记
+    local image_count
+    image_count=$(echo "$available_images" | wc -l)
+    
+    if [[ $image_count -eq 1 ]]; then
+        local source_image="$available_images"
+        log_warn "当前镜像标签为: $source_image"
+        log_warn "期望的镜像标签为: $target_image"
+        
+        read -p "是否将镜像重新标记为期望的版本？(Y/n): " retag_choice
+        if [[ "$retag_choice" != "n" && "$retag_choice" != "N" ]]; then
+            if docker tag "$source_image" "$target_image"; then
+                log_info "✓ 镜像重新标记成功: $source_image -> $target_image"
+                return 0
             else
-                log_error "版本不能为空"
+                log_error "✗ 镜像重新标记失败"
+                return 1
+            fi
+        fi
+    else
+        # 多个镜像，让用户选择
+        log_info "发现多个镜像，请选择要使用的镜像："
+        local i=1
+        while IFS= read -r image; do
+            echo "$i. $image"
+            ((i++))
+        done <<< "$available_images"
+        
+        read -p "请选择镜像编号 (1-$((i-1))): " image_choice
+        
+        if [[ "$image_choice" -ge 1 && "$image_choice" -le $((i-1)) ]]; then
+            local selected_image
+            selected_image=$(echo "$available_images" | sed -n "${image_choice}p")
+            
+            if docker tag "$selected_image" "$target_image"; then
+                log_info "✓ 镜像重新标记成功: $selected_image -> $target_image"
+                return 0
+            else
+                log_error "✗ 镜像重新标记失败"
+                return 1
             fi
         else
-            log_error "无效的选择，请重新输入"
+            log_error "无效的选择"
+            return 1
         fi
-    done
-}
-
-# 配置Docker镜像加速
-configure_docker_mirrors() {
-    log_info "配置Docker镜像加速源..."
-    
-    # 备份现有配置
-    if [[ -f /etc/docker/daemon.json ]]; then
-        cp /etc/docker/daemon.json /etc/docker/daemon.json.backup.$(date +%Y%m%d_%H%M%S)
     fi
     
-    # 创建或更新daemon.json，包含更多镜像源
-    mkdir -p /etc/docker
-    cat > /etc/docker/daemon.json << 'EOF'
-{
-    "registry-mirrors": [
-        "https://ccr.ccs.tencentyun.com",
-        "https://registry.cn-hangzhou.aliyuncs.com",
-        "https://docker.mirrors.ustc.edu.cn",
-        "https://hub-mirror.c.163.com",
-        "https://mirror.baidubce.com"
-    ],
-    "exec-opts": ["native.cgroupdriver=systemd"],
-    "log-driver": "json-file",
-    "log-opts": {
-        "max-size": "100m",
-        "max-file": "3"
-    },
-    "storage-driver": "overlay2",
-    "live-restore": true,
-    "max-concurrent-downloads": 1,
-    "max-concurrent-uploads": 1,
-    "max-download-attempts": 5,
-    "insecure-registries": []
-}
-EOF
-    
-    # 重启Docker服务应用配置
-    log_info "重启Docker服务以应用镜像加速配置..."
-    systemctl daemon-reload
-    systemctl restart docker
-    
-    # 等待Docker服务完全启动
-    sleep 5
-    
-    if systemctl is-active --quiet docker; then
-        log_info "Docker服务重启成功，镜像加速配置已生效"
-    else
-        log_error "Docker服务重启失败"
-        exit 1
-    fi
-}
-
-# 检查Docker是否已安装
-check_docker() {
-    log_info "检查Docker安装状态..."
-    
-    if ! command -v docker &> /dev/null; then
-        log_error "Docker未安装！请先运行 ../scripts/install-docker.sh 安装Docker"
-        exit 1
+    # 如果用户选择不重新标记，询问是否直接使用现有镜像
+    read -p "是否直接使用现有镜像？(y/N): " use_existing
+    if [[ "$use_existing" == "y" || "$use_existing" == "Y" ]]; then
+        # 更新QDRANT_VERSION变量为实际的镜像版本
+        local actual_version
+        actual_version=$(echo "$available_images" | head -1 | cut -d':' -f2)
+        QDRANT_VERSION="$actual_version"
+        log_info "已更新版本为: $QDRANT_VERSION"
+        return 0
     fi
     
-    if ! systemctl is-active --quiet docker; then
-        log_error "Docker服务未运行！请启动Docker服务"
-        log_info "运行命令: sudo systemctl start docker"
-        exit 1
-    fi
-    
-    log_info "Docker已安装并运行正常"
-    docker --version
-}
-
-# 检查端口是否被占用
-check_ports() {
-    log_info "检查端口占用情况..."
-    
-    if netstat -tulpn | grep -q ":${QDRANT_PORT} "; then
-        log_error "端口 ${QDRANT_PORT} 已被占用！"
-        netstat -tulpn | grep ":${QDRANT_PORT} "
-        exit 1
-    fi
-    
-    if netstat -tulpn | grep -q ":${QDRANT_GRPC_PORT} "; then
-        log_error "端口 ${QDRANT_GRPC_PORT} 已被占用！"
-        netstat -tulpn | grep ":${QDRANT_GRPC_PORT} "
-        exit 1
-    fi
-    
-    log_info "端口检查通过"
-}
-
-# 创建必要的目录
-create_directories() {
-    log_info "创建Qdrant数据和配置目录..."
-    
-    sudo mkdir -p "$QDRANT_DATA_DIR"
-    sudo mkdir -p "$QDRANT_CONFIG_DIR"
-    
-    # 设置目录权限
-    sudo chown -R 1000:1000 "$QDRANT_DATA_DIR"
-    sudo chown -R 1000:1000 "$QDRANT_CONFIG_DIR"
-    
-    log_info "目录创建完成："
-    log_info "数据目录: $QDRANT_DATA_DIR"
-    log_info "配置目录: $QDRANT_CONFIG_DIR"
-}
-
-# 创建Qdrant配置文件
-create_config() {
-    log_info "创建Qdrant配置文件..."
-    
-    cat > "$QDRANT_CONFIG_DIR/config.yaml" << 'EOF'
-# Qdrant 配置文件 - v1.14.1 兼容
-storage:
-  # 存储配置
-  storage_path: "/qdrant/storage"
-  # 启用写入优化
-  wal_capacity_mb: 32
-  wal_segments_ahead: 0
-  
-service:
-  # 服务配置
-  host: "0.0.0.0"
-  http_port: 6333
-  grpc_port: 6334
-  enable_cors: true
-  # 最大请求大小 (32MB)
-  max_request_size_mb: 32
-  # 最大响应时间
-  max_timeout_seconds: 30
-  
-log_level: "INFO"
-
-# 集群配置（可选，单机部署时注释掉）
-# cluster:
-#   enabled: false
-
-# 性能优化配置
-hnsw_config:
-  # HNSW索引参数
-  m: 16
-  ef_construct: 100
-  full_scan_threshold: 10000
-  # 最大索引线程数
-  max_indexing_threads: 0
-
-# 优化器配置
-optimizer_config:
-  # 删除向量阈值
-  deleted_threshold: 0.2
-  # 真空处理阈值
-  vacuum_min_vector_number: 1000
-  # 默认段数量
-  default_segment_number: 0
-  # 内存映射阈值
-  memmap_threshold: 50000
-  # 索引阈值
-  indexing_threshold: 20000
-  # 刷新间隔（秒）
-  flush_interval_sec: 5
-  # 最大优化线程数
-  max_optimization_threads: 1
-
-# API密钥（可选，启用身份验证）
-# api_key: "your-secret-api-key"
-
-# 快照配置
-snapshot_config:
-  snapshots_path: "/qdrant/snapshots"
-  # 快照间隔（小时，0表示禁用自动快照）
-  # snapshot_interval_hours: 24
-
-# 性能配置
-performance:
-  # 最大搜索请求数
-  max_search_requests: 100
-  # 搜索超时时间（毫秒）
-  search_timeout_ms: 30000
-
-# 禁用遥测
-telemetry_disabled: true
-EOF
-    
-    log_info "配置文件创建完成: $QDRANT_CONFIG_DIR/config.yaml"
-}
-
-# 创建Docker网络
-create_network() {
-    log_info "创建Docker网络..."
-    
-    if ! docker network ls | grep -q "$QDRANT_NETWORK"; then
-        docker network create "$QDRANT_NETWORK"
-        log_info "Docker网络 '$QDRANT_NETWORK' 创建成功"
-    else
-        log_warn "Docker网络 '$QDRANT_NETWORK' 已存在"
-    fi
+    return 1
 }
 
 # 尝试从不同镜像源拉取镜像
@@ -328,6 +272,13 @@ try_pull_from_mirror() {
 
 # 增强的镜像拉取功能
 pull_image() {
+    # 如果指定了tar文件，使用tar文件导入
+    if [[ -n "$QDRANT_TAR_FILE" ]]; then
+        import_image_from_tar
+        return $?
+    fi
+    
+    # 原有的在线拉取逻辑
     log_info "开始拉取Qdrant Docker镜像..."
     
     local image_name="qdrant/qdrant:$QDRANT_VERSION"
@@ -368,8 +319,16 @@ pull_image() {
     echo "1. 网络连接问题 - 检查服务器网络"
     echo "2. DNS解析问题 - 尝试更换DNS"
     echo "3. 手动拉取其他版本"
-    echo "4. 使用离线安装方式"
+    echo "4. 使用离线安装方式（tar文件）"
     echo
+    
+    # 提供使用tar文件的选项
+    read -p "是否使用tar文件导入镜像？(y/N): " use_tar
+    if [[ "$use_tar" == "y" || "$use_tar" == "Y" ]]; then
+        select_tar_file
+        import_image_from_tar
+        return $?
+    fi
     
     # 提供手动拉取选项
     read -p "是否尝试手动拉取？(y/N): " manual_pull
@@ -389,8 +348,11 @@ pull_image() {
         echo "docker pull registry.cn-hangzhou.aliyuncs.com/library/qdrant:${QDRANT_VERSION#v}"
         echo "docker tag registry.cn-hangzhou.aliyuncs.com/library/qdrant:${QDRANT_VERSION#v} qdrant/qdrant:$QDRANT_VERSION"
         echo
+        echo "# 或者使用tar文件导入"
+        echo "docker load -i /path/to/qdrant-image.tar"
+        echo
         
-        read -p "手动拉取完成后按 Enter 继续，或输入 'q' 退出: " continue_choice
+        read -p "手动操作完成后按 Enter 继续，或输入 'q' 退出: " continue_choice
         if [[ "$continue_choice" == "q" ]]; then
             exit 1
         fi
@@ -404,7 +366,7 @@ pull_image() {
             exit 1
         fi
     else
-        log_error "镜像拉取失败，部署终止"
+        log_error "镜像获取失败，部署终止"
         exit 1
     fi
 }
@@ -789,6 +751,9 @@ main() {
     
     # 选择版本
     select_version
+    
+    # 选择镜像获取方式
+    select_image_source
     
     # 执行部署步骤
     check_docker
