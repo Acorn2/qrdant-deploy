@@ -40,6 +40,8 @@ sudo bash deploy-qdrant.sh
 
 sudo bash deploy-qdrant-enhanced.sh
 
+sudo bash deploy-qdrant-enhanced-fixed.sh
+
 /my/tool/qdrant-v1.14.1.tar
 ```
 
