@@ -141,6 +141,11 @@ curl http://localhost:6333/health
 
 # 查看集合列表
 curl http://localhost:6333/collections
+
+Qdrant提供了Web管理界面，可以通过以下地址访问：
+本地访问: http://localhost:6333/dashboard
+外部访问: http://您的公网IP:6333/dashboard（需要配置安全组）
+
 ```
 
 ### 创建集合示例
