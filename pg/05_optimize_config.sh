@@ -30,10 +30,10 @@ sudo mkdir -p /etc/systemd/system/postgresql.service.d
 
 sudo tee /etc/systemd/system/postgresql.service.d/resource-optimize.conf << 'EOF'
 [Service]
-# 优化资源限制配置
+# 优化资源限制配置 (适用于4G内存服务器)
 CPUQuota=80%
-MemoryLimit=6G
-TasksMax=500
+MemoryLimit=2G
+TasksMax=300
 
 # 添加重启策略
 Restart=on-failure
@@ -59,27 +59,27 @@ sudo tee -a /var/lib/pgsql/data/postgresql.conf << 'EOF'
 
 # === PostgreSQL 性能和稳定性优化配置 ===
 # 添加时间: 
-# 内存配置优化
-shared_buffers = 512MB
-effective_cache_size = 2GB
-work_mem = 8MB
-maintenance_work_mem = 128MB
+# 内存配置优化 (适用于4G内存服务器)
+shared_buffers = 256MB
+effective_cache_size = 1GB
+work_mem = 4MB
+maintenance_work_mem = 64MB
 
-# WAL 配置优化
+# WAL 配置优化 (适用于4G内存服务器)
 wal_level = replica
-max_wal_size = 2GB
-min_wal_size = 128MB
+max_wal_size = 1GB
+min_wal_size = 80MB
 checkpoint_completion_target = 0.9
 checkpoint_timeout = 15min
-wal_buffers = 16MB
+wal_buffers = 8MB
 
-# 连接配置
-max_connections = 200
+# 连接配置 (适用于4G内存服务器)
+max_connections = 100
 superuser_reserved_connections = 3
 
-# 自动清理配置
+# 自动清理配置 (适用于4G内存服务器)
 autovacuum = on
-autovacuum_max_workers = 3
+autovacuum_max_workers = 2
 autovacuum_naptime = 1min
 autovacuum_vacuum_threshold = 50
 autovacuum_analyze_threshold = 50

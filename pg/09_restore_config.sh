@@ -134,12 +134,12 @@ restore_systemd_config() {
         echo "创建保守的systemd配置..."
         
         sudo mkdir -p /etc/systemd/system/postgresql.service.d
-        sudo tee "$resource_config" << 'EOF'
+                 sudo tee "$resource_config" << 'EOF'
 [Service]
-# 保守的资源限制配置
+# 保守的资源限制配置 (适用于4G内存服务器)
 CPUQuota=70%
-MemoryLimit=4G
-TasksMax=300
+MemoryLimit=2G
+TasksMax=200
 
 # 基本重启策略
 Restart=on-failure
@@ -172,20 +172,20 @@ create_production_config() {
         sudo tee -a /var/lib/pgsql/data/postgresql.conf << 'EOF'
 
 # === 生产环境配置 (恢复脚本添加) ===
-# 基本性能配置
-shared_buffers = 256MB
-effective_cache_size = 1GB
-work_mem = 4MB
-maintenance_work_mem = 64MB
+# 基本性能配置 (适用于4G内存服务器)
+shared_buffers = 128MB
+effective_cache_size = 512MB
+work_mem = 2MB
+maintenance_work_mem = 32MB
 
-# WAL配置
+# WAL配置 (适用于4G内存服务器)
 wal_level = replica
-max_wal_size = 1GB
+max_wal_size = 512MB
 min_wal_size = 80MB
 checkpoint_completion_target = 0.9
 
-# 连接配置
-max_connections = 100
+# 连接配置 (适用于4G内存服务器)
+max_connections = 50
 
 # 自动清理
 autovacuum = on

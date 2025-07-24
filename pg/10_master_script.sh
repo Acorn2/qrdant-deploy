@@ -53,28 +53,29 @@ EOF
     echo "选择操作："
     echo
     echo "🔍 诊断检查："
-    echo "  1. 立即诊断检查          - 快速检查当前状态"
-    echo "  2. 综合健康检查          - 全面系统健康分析"
-    echo "  3. 检查清理任务          - 查找可疑的清理脚本"
+    echo "  1. 配置风险分析          - 分析可能导致数据丢失的配置"
+    echo "  2. 立即诊断检查          - 快速检查当前状态"
+    echo "  3. 综合健康检查          - 全面系统健康分析"
+    echo "  4. 检查清理任务          - 查找可疑的清理脚本"
     echo
     echo "📊 监控系统："
-    echo "  4. 启用详细日志监控      - 开启调试级别日志"
-    echo "  5. 启动实时监控          - 表和连接监控"
-    echo "  6. 查看监控状态          - 检查监控运行状态"
-    echo "  7. 停止所有监控          - 停止监控并清理"
+    echo "  5. 启用详细日志监控      - 开启调试级别日志"
+    echo "  6. 启动实时监控          - 表和连接监控"
+    echo "  7. 查看监控状态          - 检查监控运行状态"
+    echo "  8. 停止所有监控          - 停止监控并清理"
     echo
     echo "⚙️  系统优化："
-    echo "  8. 配置优化             - 性能和稳定性优化"
-    echo "  9. 恢复正常配置          - 移除调试配置"
+    echo "  9. 配置优化             - 性能和稳定性优化"
+    echo "  10. 恢复正常配置         - 移除调试配置"
     echo
     echo "📋 日志分析："
-    echo "  10. 查看最新日志         - 显示最近的错误和活动"
-    echo "  11. 分析监控数据         - 分析表变化趋势"
+    echo "  11. 查看最新日志         - 显示最近的错误和活动"
+    echo "  12. 分析监控数据         - 分析表变化趋势"
     echo
     echo "🔧 工具管理："
-    echo "  12. 脚本权限设置         - 设置所有脚本执行权限"
-    echo "  13. 生成完整报告         - 生成系统状态报告"
-    echo "  14. 清理临时文件         - 清理日志和临时文件"
+    echo "  13. 脚本权限设置         - 设置所有脚本执行权限"
+    echo "  14. 生成完整报告         - 生成系统状态报告"
+    echo "  15. 清理临时文件         - 清理日志和临时文件"
     echo
     echo "  0. 退出"
     echo
@@ -85,6 +86,7 @@ check_and_fix_permissions() {
     log_step "检查和修复脚本权限..."
     
     local scripts=(
+        "00_config_analysis.sh"
         "01_immediate_check.sh"
         "02_enable_monitoring.sh"
         "03_table_monitor.sh"
@@ -498,52 +500,55 @@ main() {
     
     while true; do
         show_main_menu
-        read -p "请选择操作 (0-14): " choice
+        read -p "请选择操作 (0-15): " choice
         
         case $choice in
             1)
-                run_script "01_immediate_check.sh" "立即诊断检查"
+                run_script "00_config_analysis.sh" "配置风险分析"
                 ;;
             2)
-                run_script "07_health_check.sh" "综合健康检查"
+                run_script "01_immediate_check.sh" "立即诊断检查"
                 ;;
             3)
-                run_script "06_check_cleanup_tasks.sh" "检查清理任务"
+                run_script "07_health_check.sh" "综合健康检查"
                 ;;
             4)
-                run_script "02_enable_monitoring.sh" "启用详细日志监控"
+                run_script "06_check_cleanup_tasks.sh" "检查清理任务"
                 ;;
             5)
-                run_script "08_start_all_monitoring.sh" "启动实时监控"
+                run_script "02_enable_monitoring.sh" "启用详细日志监控"
                 ;;
             6)
-                show_monitoring_status
+                run_script "08_start_all_monitoring.sh" "启动实时监控"
                 ;;
             7)
-                stop_all_monitoring
+                show_monitoring_status
                 ;;
             8)
-                run_script "05_optimize_config.sh" "配置优化"
+                stop_all_monitoring
                 ;;
             9)
-                run_script "09_restore_config.sh" "恢复正常配置"
+                run_script "05_optimize_config.sh" "配置优化"
                 ;;
             10)
-                show_recent_logs
+                run_script "09_restore_config.sh" "恢复正常配置"
                 ;;
             11)
-                analyze_monitoring_data
+                show_recent_logs
                 ;;
             12)
+                analyze_monitoring_data
+                ;;
+            13)
                 check_and_fix_permissions
                 log_info "脚本权限设置完成"
                 echo
                 read -p "按Enter键返回主菜单..."
                 ;;
-            13)
+            14)
                 generate_full_report
                 ;;
-            14)
+            15)
                 cleanup_temp_files
                 ;;
             0)
