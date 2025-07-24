@@ -96,6 +96,21 @@ sudo systemctl restart postgresql
 ```
 
 
+修改配置文件
+```bash
+sudo vi /var/lib/pgsql/data/postgresql.conf
+```
+找到fsync行，确保fsync=on
+
+
+修改配置文件后，重启服务
+```bash
+sudo systemctl restart postgresql
+```
+
+
+
+
 创建数据库
 ```bash
 sudo -u postgres psql -c "CREATE DATABASE document_analysis;"
